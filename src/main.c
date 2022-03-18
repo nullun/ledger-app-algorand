@@ -91,14 +91,15 @@ static void handle_sign_keyreg(uint8_t ins)
   _Static_assert(sizeof(G_io_apdu_buffer) - OFFSET_CDATA >= 184, "assert");
 
   current_txn.type = KEYREG;
-  copy_and_advance( current_txn.sender,        &p, 32);
-  copy_and_advance(&current_txn.fee,           &p, 8);
-  copy_and_advance(&current_txn.firstValid,    &p, 8);
-  copy_and_advance(&current_txn.lastValid,     &p, 8);
-  copy_and_advance( current_txn.genesisID,     &p, 32);
-  copy_and_advance( current_txn.genesisHash,   &p, 32);
-  copy_and_advance( current_txn.keyreg.votepk, &p, 32);
-  copy_and_advance( current_txn.keyreg.vrfpk,  &p, 32);
+  copy_and_advance( current_txn.sender,         &p, 32);
+  copy_and_advance(&current_txn.fee,            &p, 8);
+  copy_and_advance(&current_txn.firstValid,     &p, 8);
+  copy_and_advance(&current_txn.lastValid,      &p, 8);
+  copy_and_advance( current_txn.genesisID,      &p, 32);
+  copy_and_advance( current_txn.genesisHash,    &p, 32);
+  copy_and_advance( current_txn.keyreg.votepk,  &p, 32);
+  copy_and_advance( current_txn.keyreg.vrfpk,   &p, 32);
+  copy_and_advance( current_txn.keyreg.sprfkey, &p, 64);
 
   ui_txn();
 }
