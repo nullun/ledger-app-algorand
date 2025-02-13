@@ -29,7 +29,7 @@
 #include "addr.h"
 #include "crypto.h"
 #include "coin.h"
-#include "parser.h"
+#include "common/parser.h"
 #include "zxmacros.h"
 
 static bool tx_initialized = false;
@@ -191,6 +191,19 @@ __Z_INLINE void handle_get_public_key(volatile uint32_t *flags, volatile uint32_
     THROW(APDU_CODE_OK);
 }
 
+__Z_INLINE void handle_arbitrary_sign(volatile uint32_t *flags, volatile uint32_t *tx, uint32_t rx) {
+    zemu_log("handle_arbitrary_sign\n");
+    if (!process_chunk(tx, rx)) {
+        THROW(APDU_CODE_OK);
+    }
+
+    tx_parse_arbitrary();
+
+    view_review_init(tx_getItem_arbitrary, tx_getNumItems_arbitrary, app_sign_arbitrary);
+    view_review_show(REVIEW_TXN);
+    *flags |= IO_ASYNCH_REPLY;
+}
+
 __Z_INLINE void handle_getversion(__Z_UNUSED volatile uint32_t *flags, volatile uint32_t *tx)
 {
     G_io_apdu_buffer[0] = 0;
@@ -199,14 +212,14 @@ __Z_INLINE void handle_getversion(__Z_UNUSED volatile uint32_t *flags, volatile 
     G_io_apdu_buffer[0] = 0x01;
 #endif
 
-    G_io_apdu_buffer[1] = (LEDGER_MAJOR_VERSION >> 8) & 0xFF;
-    G_io_apdu_buffer[2] = (LEDGER_MAJOR_VERSION >> 0) & 0xFF;
+    G_io_apdu_buffer[1] = (MAJOR_VERSION >> 8) & 0xFF;
+    G_io_apdu_buffer[2] = (MAJOR_VERSION >> 0) & 0xFF;
 
-    G_io_apdu_buffer[3] = (LEDGER_MINOR_VERSION >> 8) & 0xFF;
-    G_io_apdu_buffer[4] = (LEDGER_MINOR_VERSION >> 0) & 0xFF;
+    G_io_apdu_buffer[3] = (MINOR_VERSION >> 8) & 0xFF;
+    G_io_apdu_buffer[4] = (MINOR_VERSION >> 0) & 0xFF;
 
-    G_io_apdu_buffer[5] = (LEDGER_PATCH_VERSION >> 8) & 0xFF;
-    G_io_apdu_buffer[6] = (LEDGER_PATCH_VERSION >> 0) & 0xFF;
+    G_io_apdu_buffer[5] = (PATCH_VERSION >> 8) & 0xFF;
+    G_io_apdu_buffer[6] = (PATCH_VERSION >> 0) & 0xFF;
 
     G_io_apdu_buffer[7] = !IS_UX_ALLOWED;
 
@@ -251,6 +264,11 @@ void handleApdu(volatile uint32_t *flags, volatile uint32_t *tx, uint32_t rx) {
                 case INS_GET_VERSION: {
                     handle_getversion(flags, tx);
                     THROW(APDU_CODE_OK);
+                    break;
+                }
+
+                case INS_ARBITRARY_SIGN: {
+                    handle_arbitrary_sign(flags, tx, rx);
                     break;
                 }
 

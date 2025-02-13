@@ -19,6 +19,12 @@
 #include "coin.h"
 #include "zxerror.h"
 
+#define SHA_256_HASH_SIZE 32
+#define TO_SIGN_SIZE (2 * SHA_256_HASH_SIZE)
+
+void set_arbitrary_sign_domain(const char *domain);
+uint8_t get_arbitrary_sign_domain_length();
+
 void tx_initialize();
 
 /// Clears the transaction buffer
@@ -44,6 +50,8 @@ uint8_t *tx_get_buffer();
 /// \return It returns NULL if data is valid or error message otherwise.
 const char *tx_parse();
 
+void tx_parse_arbitrary();
+
 /// Return the number of items in the transaction
 zxerr_t tx_getNumItems(uint8_t *num_items);
 
@@ -52,3 +60,8 @@ zxerr_t tx_getItem(int8_t displayIdx,
                    char *outKey, uint16_t outKeyLen,
                    char *outValue, uint16_t outValueLen,
                    uint8_t pageIdx, uint8_t *pageCount);
+
+
+zxerr_t tx_getItem_arbitrary(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen, uint8_t pageIdx, uint8_t *pageCount);
+
+zxerr_t tx_getNumItems_arbitrary(uint8_t *num_items);
