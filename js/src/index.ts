@@ -27,6 +27,7 @@ import {
   processErrorResponse,
 } from "./common";
 import {CLA, INS, PKLEN} from "./config";
+import { decode } from '@msgpack/msgpack';
 import { canonify } from '@truestamp/canonify';
 import * as crypto from 'crypto'
 
@@ -227,7 +228,7 @@ export default class AlgorandApp {
       .then(processGetAddrResponse, processErrorResponse);
   }
 
-  async signSendChunk(chunkIdx: number, chunkNum: number, accountId: number, chunk: Buffer): Promise<ResponseSign> {
+  async signSendChunk(chunkIdx: number, chunkNum: number, accountId: number, chunk: Buffer, numberOfTxs?: number): Promise<ResponseSign> {
     let p1 = P1_VALUES.MSGPACK_ADD
     let p2 = P2_VALUES.MSGPACK_ADD
 
@@ -236,6 +237,10 @@ export default class AlgorandApp {
     }
     if (chunkIdx === chunkNum) {
       p2 = P2_VALUES.MSGPACK_LAST
+    }
+
+    if (numberOfTxs) {
+      p1 |= numberOfTxs << 1
     }
 
     return this.transport
@@ -281,12 +286,12 @@ export default class AlgorandApp {
       }, processErrorResponse);
   }
 
-  async sign(accountId = 0, message: string | Buffer) {
+  async sign(accountId = 0, message: string | Buffer, numberOfTxs = 0) {
     return this.signGetChunks(accountId, message).then(chunks => {
-      return this.signSendChunk(1, chunks.length, accountId, chunks[0]).then(async result => {
+      return this.signSendChunk(1, chunks.length, accountId, chunks[0], numberOfTxs).then(async result => {
         for (let i = 1; i < chunks.length; i += 1) {
           // eslint-disable-next-line no-await-in-loop,no-param-reassign
-          result = await this.signSendChunk(1 + i, chunks.length, accountId, chunks[i])
+          result = await this.signSendChunk(1 + i, chunks.length, accountId, chunks[i], numberOfTxs)
           if (result.return_code !== ERROR_CODE.NoError) {
             break
           }
@@ -299,6 +304,72 @@ export default class AlgorandApp {
         }
       }, processErrorResponse)
     })
+  }
+  async signGroup(accountId = 0, groupTxn: Buffer[]) {
+    let numOfTxns = groupTxn.length
+    let results: ResponseSign[] = [];
+    let txnIsToSign: boolean[] = new Array(numOfTxns).fill(true);
+
+    if (numOfTxns === 0) {
+      throw new Error('No transactions to sign')
+    } else if (numOfTxns === 1) {
+      throw new Error('Single transaction in group')
+    } else if (numOfTxns > 16) {
+      throw new Error('Too many transactions in group')
+    }
+
+    let responsePubKey = await this.getPubkey(accountId)
+    let senderPubKey = responsePubKey.publicKey.toString('hex')
+
+    for (let i = 0; i < groupTxn.length; i++) {
+      let sender = this.parseTxSender(groupTxn[i])
+
+      if (sender !== senderPubKey) {
+        numOfTxns -= 1
+        txnIsToSign[i] = false
+      }
+    }
+
+    if (numOfTxns <= 0) {
+      throw new Error('No transactions were meant to be signed by the device')
+    }
+
+    for (let i = 0; i < groupTxn.length; i++) {
+      let result: ResponseSign
+
+      if (txnIsToSign[i]) {
+        result = await this.sign(accountId, groupTxn[i], numOfTxns);
+
+        if (result.return_code !== ERROR_CODE.NoError) {
+          throw new Error(`Error signing transaction in group`);
+        }
+      } else {
+        result = {
+          return_code: 0x6985,
+          error_message: 'The sender in the transaction is not the same as the device',
+          signature: Buffer.from([]),
+          returnCode: 0x6985,
+          errorMessage: 'The sender in the transaction is not the same as the device'
+        }
+      }
+
+      results.push(result);
+    }
+
+    return results;
+  }
+
+  parseTxSender(txn: Buffer): string {
+    try {
+      const decoded = decode(txn);
+      if (typeof decoded === 'object' && decoded !== null && 'snd' in decoded) {
+        // @ts-ignore - We know snd exists from the check above
+        return Buffer.from(decoded.snd).toString('hex');
+      }
+      throw new Error('Invalid transaction format: snd field not found');
+    } catch (e) {
+      throw new Error(`Failed to parse msgpack`);
+    }
   }
 
   async signData(signingData: StdSigData, metadata: StdSignMetadata): Promise<StdSigDataResponse> {
@@ -342,8 +413,6 @@ export default class AlgorandApp {
                   throw new Error('Bad JSON');
               }
 
-              console.log('clientDataJson', clientDataJson)
-
               const canonifiedClientDataJson = canonify(clientDataJson);
               if (!canonifiedClientDataJson) {
                   throw new Error('Bad JSON');
@@ -360,12 +429,12 @@ export default class AlgorandApp {
               if(Buffer.compare(authenticatorData.slice(0, 32), rp_id_hash) !== 0) {
                   throw new Error('Failed Domain Auth');
               }
-              
               const clientDataJsonHash: Buffer = crypto.createHash('sha256').update(canonifiedClientDataJson).digest();
               const authenticatorDataHash: Buffer = crypto.createHash('sha256').update(authenticatorData).digest();
 
               // Concatenate clientDataJsonHash and authenticatorData
               toSign = Buffer.concat([clientDataJsonHash, authenticatorDataHash]);
+
               break;
 
           default:
@@ -383,44 +452,42 @@ export default class AlgorandApp {
   }
 
   private async rawSign(domain: string, data: Uint8Array, toSign: Uint8Array): Promise<ResponseSign> {
-     const message = Buffer.concat([
-         Buffer.from(toSign),
-         Buffer.from(domain + '\0'),
-         data
-     ])
+    const message = Buffer.concat([
+        Buffer.from(toSign),
+        Buffer.from(domain + '\0'),
+        data
+    ])
 
-     const chunks = [];
-     for (let i = 0; i < message.length; i += CHUNK_SIZE) {
-       let end = i + CHUNK_SIZE;
-       if (end > message.length) {
-         end = message.length;
-       }
-       chunks.push(message.slice(i, end));
-     }
+    const chunks = [];
+    for (let i = 0; i < message.length; i += CHUNK_SIZE) {
+      let end = i + CHUNK_SIZE;
+      if (end > message.length) {
+        end = message.length;
+      }
+      chunks.push(message.slice(i, end));
+    }
 
-     console.log('chunks', chunks.map(chunk => chunk.toString('hex')))
+    let return_code = 0
+    let response = Buffer.from([])
+    for (let i = 0; i < chunks.length; i++) {
+      const isLastChunk = i === chunks.length - 1;
+      const p1 = i === 0 ? P1_VALUES.MSGPACK_FIRST : P1_VALUES.MSGPACK_ADD;
+      const p2 = isLastChunk ? P2_VALUES.MSGPACK_LAST : P2_VALUES.MSGPACK_ADD;
 
-     let return_code = 0
-     let response = Buffer.from([])
-     for (let i = 0; i < chunks.length; i++) {
-       const isLastChunk = i === chunks.length - 1;
-       const p1 = i === 0 ? P1_VALUES.MSGPACK_FIRST : P1_VALUES.MSGPACK_ADD;
-       const p2 = isLastChunk ? P2_VALUES.MSGPACK_LAST : P2_VALUES.MSGPACK_ADD;
+      response = await this.transport.send(CLA, INS.SIGN_ARBITRARY, p1, p2, chunks[i]);
+      return_code = response.slice(-2)[0] * 256 + response.slice(-2)[1]
 
-       response = await this.transport.send(CLA, INS.SIGN_ARBITRARY, p1, p2, chunks[i]);
-       return_code = response.slice(-2)[0] * 256 + response.slice(-2)[1]
+      if (return_code !== ERROR_CODE.NoError) {
+        break;
+      }
+    }
 
-       if (return_code !== ERROR_CODE.NoError) {
-         break;
-       }
-     }
-
-     return {
+    return {
       signature: response.slice(0, response.length - 2),
-       returnCode: return_code,
-       errorMessage: errorCodeToString(return_code),
-       return_code: return_code,
-       error_message: errorCodeToString(return_code),
+      returnCode: return_code,
+      errorMessage: errorCodeToString(return_code),
+      return_code: return_code,
+      error_message: errorCodeToString(return_code),
     }
   }
 }

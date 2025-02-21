@@ -17,15 +17,16 @@
 #include "tx.h"
 #include "apdu_codes.h"
 #include "buffering.h"
+#include "app_mode.h"
 #include "common/parser.h"
 #include <string.h>
 #include "zxmacros.h"
 #include "zxformat.h"
 
-#if defined(TARGET_NANOX) || defined(TARGET_NANOS2) || defined(TARGET_STAX) || defined(TARGET_FLEX)
+#if !defined(TARGET_NANOS)
 #define RAM_BUFFER_SIZE 8192
 #define FLASH_BUFFER_SIZE 16384
-#elif defined(TARGET_NANOS)
+#else
 #define RAM_BUFFER_SIZE 256
 #define FLASH_BUFFER_SIZE 8192
 #endif
@@ -42,6 +43,7 @@ typedef struct
 } storage_t;
 
 char arbitrary_sign_domain[50];
+uint64_t group_max_fees;
 
 void set_arbitrary_sign_domain(const char *domain) {
     strncpy(arbitrary_sign_domain, domain, sizeof(arbitrary_sign_domain));
@@ -50,11 +52,13 @@ void set_arbitrary_sign_domain(const char *domain) {
 #if defined(TARGET_NANOS) || defined(TARGET_NANOX) || defined(TARGET_NANOS2) || defined(TARGET_STAX) || defined(TARGET_FLEX)
 storage_t NV_CONST N_appdata_impl __attribute__((aligned(64)));
 #define N_appdata (*(NV_VOLATILE storage_t *)PIC(&N_appdata_impl))
+#else
+storage_t N_appdata_impl;
+#define N_appdata N_appdata_impl
 #endif
 
 static parser_tx_t parser_tx_obj;
 static parser_context_t ctx_parsed_tx;
-
 typedef struct {
     char *json_key_positions[15];
     char *json_value_positions[15];
@@ -62,6 +66,39 @@ typedef struct {
 } tx_parsed_json_t;
 
 tx_parsed_json_t tx_parsed_json;
+
+static group_txn_state_t group_txn = {0};
+
+void tx_group_state_reset() {
+    group_txn.num_of_txns = 0;
+    group_txn.initialized = 0;
+    group_txn.num_of_txns_reviewed = 0;
+    group_max_fees = 0;
+}
+
+uint8_t tx_group_get_num_of_txns() {
+    return group_txn.num_of_txns;
+}
+
+uint8_t tx_group_get_num_of_txns_reviewed() {
+    return group_txn.num_of_txns_reviewed;
+}
+
+void tx_group_increment_num_of_txns_reviewed() {
+    group_txn.num_of_txns_reviewed++;
+}
+
+uint8_t tx_group_is_initialized() {
+    return group_txn.initialized;
+}
+
+void tx_group_initialize() {
+    group_txn.initialized = 1;
+}
+
+void tx_group_set_num_of_txns(uint8_t num_of_txns) {
+    group_txn.num_of_txns = num_of_txns;
+}
 
 void tx_initialize()
 {
@@ -125,6 +162,12 @@ void tx_parse_reset()
 
 zxerr_t tx_getNumItems(uint8_t *num_items)
 {
+    if (tx_group_is_initialized() && app_mode_blindsign_required()) {
+        // Group ID, Max Fees, Sender
+        *num_items = 3;
+        return zxerr_ok;
+    }
+
     parser_error_t err = parser_getNumItems(num_items);
     if (err != parser_ok) {
         return zxerr_unknown;
@@ -141,7 +184,7 @@ zxerr_t tx_getItem(int8_t displayIdx,
 
     CHECK_ZXERR(tx_getNumItems(&numItems))
 
-    if (displayIdx > numItems) {
+    if (displayIdx >= numItems) {
         return zxerr_no_data;
     }
 
@@ -205,7 +248,7 @@ zxerr_t tx_getItem_arbitrary(int8_t displayIdx, char *outKey, uint16_t outKeyLen
 }
 
 zxerr_t tx_getNumItems_arbitrary(uint8_t *num_items) {
-    char *json = (char *) (tx_get_buffer() + TO_SIGN_SIZE + strlen("TX") + strlen(arbitrary_sign_domain) + 1);
+    char *json = (char *) (tx_get_buffer() + TO_SIGN_SIZE + strlen(arbitrary_sign_domain) + 1);
     int count = 1;
     bool in_string = false;
     
@@ -223,9 +266,9 @@ zxerr_t tx_getNumItems_arbitrary(uint8_t *num_items) {
 
 // JSON parser for maximum of 1 nesting level in JSON
 void tx_parse_arbitrary() {
-    set_arbitrary_sign_domain((char *) (tx_get_buffer() + TO_SIGN_SIZE + strlen("TX")));
+    set_arbitrary_sign_domain((char *) (tx_get_buffer() + TO_SIGN_SIZE));
 
-    char *json = (char *) (tx_get_buffer() + TO_SIGN_SIZE + strlen("TX") + strlen(arbitrary_sign_domain) + 1);
+    char *json = (char *) (tx_get_buffer() + TO_SIGN_SIZE + strlen(arbitrary_sign_domain) + 1);
 
     uint8_t idx = 0;
     while (*json) {
