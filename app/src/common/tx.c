@@ -1,5 +1,5 @@
 /*******************************************************************************
-*  (c) 2018 - 2022 Zondax AG
+*  (c) 2018 - 2024 Zondax AG
 *
 *  Licensed under the Apache License, Version 2.0 (the "License");
 *  you may not use this file except in compliance with the License.
@@ -17,17 +17,21 @@
 #include "tx.h"
 #include "apdu_codes.h"
 #include "buffering.h"
-#include "parser.h"
+#include "app_mode.h"
+#include "common/parser.h"
 #include <string.h>
 #include "zxmacros.h"
+#include "zxformat.h"
 
-#if defined(TARGET_NANOX) || defined(TARGET_NANOS2) || defined(TARGET_STAX)
+#if !defined(TARGET_NANOS)
 #define RAM_BUFFER_SIZE 8192
 #define FLASH_BUFFER_SIZE 16384
-#elif defined(TARGET_NANOS)
+#else
 #define RAM_BUFFER_SIZE 256
 #define FLASH_BUFFER_SIZE 8192
 #endif
+
+#define OFFSET_DATA 5
 
 // Ram
 uint8_t ram_buffer[RAM_BUFFER_SIZE];
@@ -38,13 +42,63 @@ typedef struct
     uint8_t buffer[FLASH_BUFFER_SIZE];
 } storage_t;
 
-#if defined(TARGET_NANOS) || defined(TARGET_NANOX) || defined(TARGET_NANOS2) || defined(TARGET_STAX)
+char arbitrary_sign_domain[50];
+uint64_t group_max_fees;
+
+void set_arbitrary_sign_domain(const char *domain) {
+    strncpy(arbitrary_sign_domain, domain, sizeof(arbitrary_sign_domain));
+}
+
+#if defined(TARGET_NANOS) || defined(TARGET_NANOX) || defined(TARGET_NANOS2) || defined(TARGET_STAX) || defined(TARGET_FLEX)
 storage_t NV_CONST N_appdata_impl __attribute__((aligned(64)));
 #define N_appdata (*(NV_VOLATILE storage_t *)PIC(&N_appdata_impl))
+#else
+storage_t N_appdata_impl;
+#define N_appdata N_appdata_impl
 #endif
 
 static parser_tx_t parser_tx_obj;
 static parser_context_t ctx_parsed_tx;
+typedef struct {
+    char *json_key_positions[15];
+    char *json_value_positions[15];
+    uint16_t json_value_lengths[15];
+} tx_parsed_json_t;
+
+tx_parsed_json_t tx_parsed_json;
+
+static group_txn_state_t group_txn = {0};
+
+void tx_group_state_reset() {
+    group_txn.num_of_txns = 0;
+    group_txn.initialized = 0;
+    group_txn.num_of_txns_reviewed = 0;
+    group_max_fees = 0;
+}
+
+uint8_t tx_group_get_num_of_txns() {
+    return group_txn.num_of_txns;
+}
+
+uint8_t tx_group_get_num_of_txns_reviewed() {
+    return group_txn.num_of_txns_reviewed;
+}
+
+void tx_group_increment_num_of_txns_reviewed() {
+    group_txn.num_of_txns_reviewed++;
+}
+
+uint8_t tx_group_is_initialized() {
+    return group_txn.initialized;
+}
+
+void tx_group_initialize() {
+    group_txn.initialized = 1;
+}
+
+void tx_group_set_num_of_txns(uint8_t num_of_txns) {
+    group_txn.num_of_txns = num_of_txns;
+}
 
 void tx_initialize()
 {
@@ -108,6 +162,12 @@ void tx_parse_reset()
 
 zxerr_t tx_getNumItems(uint8_t *num_items)
 {
+    if (tx_group_is_initialized() && app_mode_blindsign_required()) {
+        // Group ID, Max Fees, Sender
+        *num_items = 3;
+        return zxerr_ok;
+    }
+
     parser_error_t err = parser_getNumItems(num_items);
     if (err != parser_ok) {
         return zxerr_unknown;
@@ -122,16 +182,9 @@ zxerr_t tx_getItem(int8_t displayIdx,
 {
     uint8_t numItems = 0;
 
-#if defined(TARGET_STAX)
-    if (displayIdx == -1) {
-        const parser_error_t tmpError = parser_getTxnText(&ctx_parsed_tx, outVal, outValLen);
-        return (tmpError == parser_ok ? zxerr_ok : zxerr_no_data);
-    }
-#endif
-
     CHECK_ZXERR(tx_getNumItems(&numItems))
 
-    if (displayIdx > numItems) {
+    if (displayIdx >= numItems) {
         return zxerr_no_data;
     }
 
@@ -151,4 +204,118 @@ zxerr_t tx_getItem(int8_t displayIdx,
         return zxerr_unknown;
 
     return zxerr_ok;
+}
+
+zxerr_t tx_getItem_arbitrary(int8_t displayIdx, char *outKey, uint16_t outKeyLen, char *outVal, uint16_t outValLen, uint8_t pageIdx, uint8_t *pageCount) {
+    uint8_t numItems = 0;
+
+    CHECK_ZXERR(tx_getNumItems_arbitrary(&numItems))
+
+    if (displayIdx >= numItems) {
+        return zxerr_no_data;
+    }
+
+    MEMZERO(outKey, outKeyLen);
+    MEMZERO(outVal, outValLen);
+    *pageCount = 0;
+
+    if (displayIdx < 0) {
+        snprintf(outKey, outKeyLen, "Review message");
+        return zxerr_ok;
+    }
+
+    if (displayIdx == 0) {
+        *pageCount = 1;
+        snprintf(outKey, outKeyLen, "Domain");
+        pageString(outVal, outValLen, arbitrary_sign_domain, pageIdx, pageCount);
+        return zxerr_ok;
+    }
+
+    size_t key_len = 0;
+    char *key_pos = tx_parsed_json.json_key_positions[displayIdx - 1];
+
+    while (key_pos[key_len++] != '"')
+        ;
+
+    snprintf(outKey, outKeyLen, "%s", tx_parsed_json.json_key_positions[displayIdx - 1]);
+    outKey[key_len - 1] = '\0';
+
+    char tmpBuf[256];
+    snprintf(tmpBuf, sizeof(tmpBuf), "%s", tx_parsed_json.json_value_positions[displayIdx - 1]);
+    tmpBuf[tx_parsed_json.json_value_lengths[displayIdx - 1]] = '\0';
+    pageString(outVal, outValLen, tmpBuf, pageIdx, pageCount);
+    return zxerr_ok;
+}
+
+zxerr_t tx_getNumItems_arbitrary(uint8_t *num_items) {
+    char *json = (char *) (tx_get_buffer() + TO_SIGN_SIZE + strlen(arbitrary_sign_domain) + 1);
+    int count = 1;
+    bool in_string = false;
+    
+    while (*json) {
+        if (*json == '"') {
+            in_string = !in_string;
+        } else if (!in_string && *json == ':') {
+            count++;
+        }
+        json++;
+    }
+    *num_items = count;
+    return zxerr_ok;
+}
+
+// JSON parser for maximum of 1 nesting level in JSON
+void tx_parse_arbitrary() {
+    set_arbitrary_sign_domain((char *) (tx_get_buffer() + TO_SIGN_SIZE));
+
+    char *json = (char *) (tx_get_buffer() + TO_SIGN_SIZE + strlen(arbitrary_sign_domain) + 1);
+
+    uint8_t idx = 0;
+    while (*json) {
+        while (*json && *json != '"') json++;
+
+        char *key_start = ++json;
+        char *key_end = key_start;
+        while (*key_end && *key_end != '"') key_end++;
+        
+        tx_parsed_json.json_key_positions[idx] = key_start;
+        json = key_end + 1;
+
+        while (*json && *json != ':') json++;
+        if (*json == ':') json++;
+
+        while (*json && (*json == ' ' || *json == '\t' || *json == '\n')) json++;
+        
+        if (*json == '"') {
+            char *value_start = ++json;
+            char *value_end = value_start;
+            while (*value_end && *value_end != '"') value_end++;
+            
+            tx_parsed_json.json_value_positions[idx] = value_start;
+            tx_parsed_json.json_value_lengths[idx] = value_end - value_start;
+            json = value_end + 1;
+        } else {
+            char *value_start = json;
+            char *value_end = value_start;
+            
+            if (*json == '[') {
+                value_start = json;
+                int bracket_count = 1;
+                value_end = value_start + 1;
+                
+                while (*value_end && bracket_count > 0) {
+                    if (*value_end == '[') bracket_count++;
+                    if (*value_end == ']') bracket_count--;
+                    value_end++;
+                }
+            } else {
+                while (*value_end && *value_end != ',' && *value_end != '}') value_end++;
+            }
+            
+            tx_parsed_json.json_value_positions[idx] = value_start;
+            tx_parsed_json.json_value_lengths[idx] = value_end - value_start;
+            json = value_end + 1;
+        }
+        idx++;
+    }
 }

@@ -36,6 +36,8 @@ typedef enum {
     parser_display_idx_out_of_range,
     parser_display_page_out_of_range,
     parser_unexpected_error,
+    parser_blindsign_mode_required,
+
     // Coin generic
     parser_unexpected_type,
     parser_unexpected_method,
@@ -56,7 +58,6 @@ typedef enum {
     parser_buffer_too_small,
 
     parser_unknown_transaction,
-
     parser_key_not_found,
 
     //Msgpack specific
